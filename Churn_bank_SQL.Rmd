@@ -1,0 +1,356 @@
+---
+title: 'Отчет: отток клиентов банка'
+author: "Анна Кострова"
+date: "Last updated: `r format(Sys.time(), '%d %B, %Y')`"
+output: 
+    html_document:
+      theme: cerulean
+      code_folding: hide
+      toc: true
+      toc_float: true
+---
+##### Клиенты банка
+
+Данные в папке project "~/shared/minor2_2019/3-SQL/project/BankChurn.db". Содержит две таблицы
+
+* churn
+   * CustomerId: id клиента
+   * Surname: фамилия клиента -
+   * CreditScore: кредитный скоринг клиента
+   * CountryId: id страны
+   * Gender: пол клиента
+   * Age: возраст клиента
+   * Tenure: как долго клиент сотрудничает с банком (в месяцах)
+   * Balance: текущий баланс клиента
+   * NumOfProducts: количество продуктов, которыми пользуется клиент (кредитов, карт, счетов)
+   * HasCrCard: есть ли кредитная карта
+   * IsActiveMember: является ли клиент активным (часто совершает действия)
+   * EstimatedSalary: заработная плата клиента
+   * Exited: ушел ли клиент (1- ушел, 0 - остался)
+   
+* country
+   * CountryId: id страны
+   * Country: название страны
+
+# Введение 
+
+## Задача
+
+В качестве данных мне были предоставлены сведения о клиентах банка. Задачами данного отчета были: анализ данных касательно оттока клиентов из банка, а ткаже демонстрация полученных результатов в компактной и понятной форме. Далее будут представлены разделы, в которых буду описаны сами данные, проведен разведывательный анализ, построены предсказательные модели и предложены варианты уменьшения оттака клиентов.
+
+## Данные
+
+Всего в данных была собрана информация о 10 000 клиентах из трех стран - Франция, Германия и Испания. 5014 (50.1%) клиентов были из Франции, осташиеся разделилиись примерно поровну - на Германию пришлось 2509 (25.1%) наблюдений и 2477 (24.8%) пришлось на Испанию. Из всех клиентов 7963 (79.6%) были отмечены как те, кто ушел из компании, а осталсиь 2037 (20.4%) клиентов.	При этом  51.5% клиентов были отмечены в базе как активные, в то время как 4849 (48.5%) клиентов были не активными. Всего из 
+
+```{r}
+library(dplyr)
+library(DBI)
+library(RSQLite)
+library(gtable)
+library(purrr)
+library(cluster)
+library(ggcorrplot)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(psych)
+library(GGally)
+library(gridExtra)
+library(kableExtra)
+library(grid)
+library(gtable)
+library(caret)
+library(MASS)
+library(pROC)
+library(corrplot)
+con <- DBI::dbConnect(SQLite(), "~/Downloads/Майнор/BankChurn.db")
+```
+
+```{r}
+## Кол-во клиентов
+dbGetQuery(con, "SELECT COUNT(*) FROM churn")
+dbGetQuery(con, "SELECT DISTINCT Country FROM country")
+
+exited = dbGetQuery(con, "SELECT Exited, COUNT(Exited) AS count_churn, ( SELECT COUNT(*) FROM churn) AS all_count
+                 FROM churn
+                 GROUP BY Exited")
+```
+
+
+
+```{r}
+credit_clusters = dbGetQuery(con, "SELECT CreditScore, Gender, Age, Tenure, Balance, NumOfProducts, HasCrCard, IsActiveMember, EstimatedSalary, Country, Exited
+                             FROM churn INNER JOIN country
+                              ON churn.CountryId = country.CountryId")
+
+credit_clusters$Gender = as.numeric(credit_clusters$Gender == "Male")
+credit_clusters$Country[credit_clusters$Country == "France"] <- "1"
+credit_clusters$Country[credit_clusters$Country == "Germany"] <- "2"
+credit_clusters$Country[credit_clusters$Country == "Spain"] <- "3"
+credit_clusters$Country = as.numeric(credit_clusters$Country)
+
+
+# Apply the function to each numeric variable in the clustering set
+credit_clusters_scale <- credit_clusters %>% mutate_if(is.numeric, scale) %>% dplyr::select(-Exited, -HasCrCard, -EstimatedSalary, -Tenure)
+                                                                                        
+
+set.seed(1234)
+# Use map_dbl to run many models with varying value of k (centers)
+tot_withinss <- map_dbl(1:10,  function(k){
+  model <- kmeans(x = credit_clusters_scale, centers = k)
+  model$tot.withinss
+})
+set.seed(1234)
+# Generate a data frame containing both k and tot_withinss
+elbow_df <- data.frame(
+  k = 1:10,
+  tot_withinss = tot_withinss
+)
+
+# Plot the elbow plot
+elbow_plot = ggplot(elbow_df, aes(x = k, y = tot_withinss)) +
+  geom_line() +
+  labs(x = "Number of clusters", y ="Total within-cluster sum of squares",title = "Elbow plot") +
+  scale_x_continuous(breaks = 1:10) + theme_linedraw() +
+  theme(plot.title = element_text(size=14, hjust = 0.5, face="bold"))
+elbow_plot
+```
+
+```{r fig.height=6, fig.width=8}
+set.seed(5684)
+clusters <- kmeans(credit_clusters_scale, 3)
+credit_clusters$Cluster <- as.factor(clusters$cluster)
+credit_clusters_scale$Cluster <- as.factor(clusters$cluster)
+
+# Look at the distribution of cluster
+kable(table(credit_clusters$Cluster))%>% 
+  kable_styling(bootstrap_options=c("bordered", "responsive","striped"), full_width = FALSE)
+
+# Group by the cluster assignment and calculate averages
+clus_avg <- credit_clusters_scale %>%
+    group_by(Cluster) %>%
+    summarize_if(is.numeric,mean)
+
+# Create the min-max scaling function
+min_max_standard <- function(x) {
+  (x - min(x))/(max(x)-min(x))
+}
+
+# Apply this function to each numeric variable in the bustabit_clus_avg object
+avg_minmax <- clus_avg %>%
+    mutate_if(is.numeric, min_max_standard)
+
+# Load the GGally package
+              
+# Create a parallel coordinate plot of the values, starts with column 2
+parrallel_plot = ggparcoord(avg_minmax, columns = 2:ncol(avg_minmax), 
+           groupColumn = "Cluster", scale = "globalminmax", order = "skewness")  +
+  labs(x = "", title = "Parallel Coordinate Plot") + theme_linedraw() +
+  theme(plot.title = element_text(size=14, hjust = 0.5, face="bold"))
+
+clusters_churn_plot = credit_clusters %>% ggplot(aes(x=Cluster,fill=as.factor(Exited))) + 
+  geom_bar(position = 'fill') +
+  labs(y = "Percent", title = "Churn of cluents by clusters") +
+  geom_text(data = . %>% 
+              group_by(Cluster, Exited) %>%
+              tally() %>%
+              mutate(p = n / sum(n)) %>%
+              ungroup(),
+            aes(y = p, label = scales::percent(p)),
+            position = position_stack(vjust = 0.5),
+            show.legend = FALSE) + 
+  scale_y_continuous(labels = scales::percent)+ theme_linedraw() +
+  theme(plot.title = element_text(size=14, hjust = 0.5, face="bold"))
+
+grid.arrange(parrallel_plot, clusters_churn_plot, nrow = 2)
+```
+```{r}
+library(arsenal) 
+my_controls = tableby.control(
+  test = T,
+  total = T,
+  numeric.test = "kwt", cat.test = "chisq",
+  numeric.stats = c("meansd", "q1q3", "min", "max"),
+  cat.stats = c("countpct"),
+  stats.labels = list(
+    meansd = "Mean (SD)",
+    q1q3 = "Q1, Q3",
+    max = "Max",
+    min = "Min"
+  ),
+  digits = 0L
+)
+
+credit_clusters$Gender[credit_clusters$Gender == 1] <- "Male"
+credit_clusters$Gender[credit_clusters$Gender == 0] <- "Female"
+credit_clusters$Country[credit_clusters$Country == 1] <- "France"
+credit_clusters$Country[credit_clusters$Country == 2] <- "Germany"
+credit_clusters$Country[credit_clusters$Country == 3] <- "Spain"
+credit_clusters$HasCrCard = as.factor(credit_clusters$HasCrCard)
+credit_clusters$IsActiveMember = as.factor(credit_clusters$IsActiveMember)
+credit_clusters$Exited = as.factor(credit_clusters$Exited)
+
+
+# install.packages("arsenal")
+table_one <- tableby(Cluster ~ ., data = credit_clusters, control = my_controls) 
+summary(table_one)
+```
+# Деление на тестовую и обучающую 
+
+```{r}
+# 1st cluster
+model_data = credit_clusters %>% filter(Cluster == "1")
+model_data = model_data %>% dplyr::select(-Cluster, -HasCrCard)
+model_data$Gender = as.factor(model_data$Gender)
+model_data$Country = as.factor(model_data$Country)
+
+# model_data$CreditScore[model_data$CreditScore >=350 & model_data$CreditScore <500] <- "Очень низкий"
+# model_data$CreditScore[model_data$CreditScore == "[500,600)"] <- "Низкий"
+# model_data$CreditScore[model_data$CreditScore == "[600,650)"] <- "Средний"
+# model_data$CreditScore[model_data$CreditScore == "[650,690)"] <- "Хороший"
+# model_data$CreditScore[model_data$CreditScore == "[690,850)"] <- "Высокий"
+
+set.seed(123)
+test_ind = createDataPartition(model_data$Exited, p = 0.2, list = FALSE)
+model_data.test = model_data[test_ind,]
+model_data.train = model_data[-test_ind,]
+```
+
+# Логистическая регрессия
+
+```{r}
+logitModelFull <- glm(Exited~., family = binomial, model_data.train)
+logitModelFull_1 <- glm(Exited~Age+IsActiveMember+Country+Gender, family = binomial, model_data.train)
+#Build the new model
+logitModelFull_new <- stepAIC(logitModelFull,trace = 0) 
+summary(logitModelFull)
+summary(logitModelFull_new)
+summary(logitModelFull_1)
+```
+```{r}
+train <- predict(logitModelFull, model_data.train, type="response")
+pred <- factor(ifelse(train > 0.65,"1","0"))
+confusion <- caret::confusionMatrix(pred, model_data.train$Exited, mode = "prec_recall")
+confusion
+
+test <- predict(logitModelFull, model_data.test, type="response")
+pred <- factor(ifelse(test > 0.65,"1","0"))
+confusion <- caret::confusionMatrix(pred, model_data.test$Exited, mode = "prec_recall")
+confusion
+```
+
+```{r}
+train1 <- predict(logitModelFull_new, model_data.train, type="response")
+pred1 <- factor(ifelse(train1 > 0.65,"1","0"))
+confusion <- caret::confusionMatrix(pred1, model_data.train$Exited, mode = "prec_recall")
+confusion
+
+test1 <- predict(logitModelFull_new, model_data.test, type="response")
+pred1 <- factor(ifelse(test1 > 0.65,"1","0"))
+confusion <- caret::confusionMatrix(pred1, model_data.test$Exited, mode = "prec_recall")
+confusion
+```
+
+```{r}
+train2 <- predict(logitModelFull_1, model_data.train, type="response")
+pred2 <- factor(ifelse(train2 > 0.65,"1","0"))
+confusion <- caret::confusionMatrix(pred2, model_data.train$Exited, mode = "prec_recall")
+confusion
+
+test2 <- predict(logitModelFull_1, model_data.test, type="response")
+pred2 <- factor(ifelse(test2 > 0.65,"1","0"))
+confusion <- caret::confusionMatrix(pred2, model_data.test$Exited, mode = "prec_recall")
+confusion
+```
+
+```{r}
+library(pROC)
+ROC_1 = roc(response = model_data.test$Exited, predictor = test)
+ROC_2 = roc(response = model_data.test$Exited, predictor = test1)
+ROC_3 = roc(response = model_data.test$Exited, predictor = test2)
+
+ggplot() + geom_path(aes(y=ROC_1$sensitivities, x=1-ROC_1$specificities)) +
+  geom_path(aes(y=ROC_2$sensitivities, x=1-ROC_2$specificities), color = "blue") +
+  geom_path(aes(y=ROC_3$sensitivities, x=1-ROC_3$specificities), color = "green") +
+  xlab("FPR") + ylab("TPR")
+
+pROC::auc(ROC_1)
+pROC::auc(ROC_2)
+pROC::auc(ROC_3)
+```
+
+
+# Обычное дерево 
+
+```{r}
+library(partykit)
+library(caret)
+
+treemodel = ctree(Exited~., data = model_data.train)
+predTest = predict(treemodel, model_data.test)
+confusionMatrix(predTest, model_data.test$Exited, mode = "prec_recall")
+```
+
+```{r}
+library(vip)
+vip(logitModelFull_new)
+vip(treemodel)
+```
+
+# Randomforest
+
+```{r message=FALSE, warning=FALSE}
+library(randomForest)
+set.seed(1)
+model.rf=randomForest(Exited~.,data=model_data.train, mtry=2, ntree = 1500)
+predTrain.rf = predict(model.rf, model_data.train)
+predTest.rf = predict(model.rf, model_data.test)
+```
+
+```{r}
+accuracyTrain.rf = confusionMatrix(predTrain.rf, model_data.train$Exited, positive = "1")$overall["Accuracy"]
+accuracyTest.rf = confusionMatrix(predTest.rf, model_data.test$Exited, positive = "1")$overall["Accuracy"]
+accuracyTrain.rf
+accuracyTest.rf
+```
+
+```{r}
+importance(model.rf)
+varImpPlot(model.rf)
+```
+
+```{r}
+library(gbm)
+set.seed(123)
+model.boost=gbm((as.numeric(Exited)-1)~., data=model_data.train, distribution="bernoulli", n.trees=5000, interaction.depth=4)
+summary(model.boost)
+```
+
+```{r}
+predTrainProb.boost = predict(model.boost, model_data.train, n.trees = 2000, type = "response")
+predTestProb.boost = predict(model.boost, model_data.test, n.trees = 2000, type = "response")
+
+head(predTrainProb.boost)
+```
+```{r}
+predTrain.boost = as.factor(ifelse(predTrainProb.boost > 0.5, "1", "0"))
+predTest.boost = as.factor(ifelse(predTestProb.boost > 0.5, "1", "0"))
+
+accuracyTrain.boost = confusionMatrix(predTrain.boost, model_data.train$Exited, positive = "1")$overall["Accuracy"]
+accuracyTest.boost = confusionMatrix(predTest.boost, model_data.test$Exited, positive = "1")$overall["Accuracy"]
+accuracyTrain.boost
+accuracyTest.boost
+```
+
+
+Для проведения анализа, я также решила разбить перменную CreditScore на несколько уровней рейтинга внутри банковской системы: 350-500 - очень низкий рейтинг, 500-600 - низкий рейтинг, 600-650 - средний рейтинг, 650-690 - хороший рейтинг, 690-850 - высокий рейтинг. Разбиение было взято  учетом информации с сайта[https://gurukredit.ru/chto-takoe-skoring-v-banke-vidy-i-effektivnost-ocenivaniya/]
+```{r}
+# CreditScore = dbGetQuery(con, "SELECT CreditScore FROM churn")
+# ggplot(CreditScore)+geom_histogram(aes(x=CreditScore))
+# 
+# CreditScore$CreditScore[CreditScore$CreditScore == "[350,500)"] <- "Очень низкий"
+# CreditScore$CreditScore[CreditScore$CreditScore == "[500,600)"] <- "Низкий"
+# CreditScore$CreditScore[CreditScore$CreditScore == "[600,650)"] <- "Средний"
+# CreditScore$CreditScore[CreditScore$CreditScore == "[650,690)"] <- "Хороший"
+# CreditScore$CreditScore[CreditScore$CreditScore == "[690,850)"] <- "Высокий"
+```
